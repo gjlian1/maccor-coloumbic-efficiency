@@ -11,15 +11,12 @@ st.set_page_config(
 
 st.title("🔋 Battery Data & Specific Capacity Analyzer")
 st.markdown(
-    "Drag & drop Maccor files (`.000`–`.xxx`, `.txt`, `.csv`) to extract step specific capacities (**mAh/g**) and plot performance curves."
+    "Drag & drop Maccor files (`.000`–`.xxx`, `.txt`, `.csv`) to extract step specific capacities (**mAh/g**), discharge capacity (**Ah**), and plot performance curves."
 )
 
 
 def parse_header_metadata(lines):
-  """Extracts Active Mass (SCap) from header metadata if available (e.g.
-
-  'SCap: 0.0347 g').
-  """
+  """Extracts Active Mass (SCap) from header metadata if available (e.g. 'SCap: 0.0347 g')."""
   mass_g = None
   for line in lines:
     if "SCap:" in line or "Mass:" in line:
@@ -114,7 +111,7 @@ def auto_detect_columns(df):
 
 
 def process_dataframe(df, filename="", active_mass_g=None):
-  """Calculates CC, CV, Total Charge, Discharge Specific Capacities (mAh/g) and Coulombic Efficiency."""
+  """Calculates CC, CV, Total Charge, Discharge Specific Capacities (mAh/g), Discharge Capacity (Ah), and Coulombic Efficiency."""
   df.columns = df.columns.str.strip()
 
   cycle_col, spec_cap_col, cap_col, md_col, step_col = auto_detect_columns(df)
@@ -144,7 +141,12 @@ def process_dataframe(df, filename="", active_mass_g=None):
     if cycle == 0:
       continue
 
-    if md_col and md_col in cycle_data.columns and step_col and step_col in cycle_data.columns:
+    if (
+        md_col
+        and md_col in cycle_data.columns
+        and step_col
+        and step_col in cycle_data.columns
+    ):
       steps = cycle_data.groupby(step_col)[md_col].first().reset_index()
       c_steps = steps[steps[md_col] == "C"][step_col].tolist()
       d_steps = steps[steps[md_col] == "D"][step_col].tolist()
@@ -153,6 +155,7 @@ def process_dataframe(df, filename="", active_mass_g=None):
       cv_step = c_steps[1] if len(c_steps) > 1 else None
       dc_step = d_steps[0] if len(d_steps) > 0 else None
 
+      # Specific capacities (mAh/g)
       cc_cap = (
           cycle_data[cycle_data[step_col] == cc_step][target_cap_col].iloc[-1]
           if cc_step
@@ -168,10 +171,26 @@ def process_dataframe(df, filename="", active_mass_g=None):
           if dc_step
           else 0.0
       )
+
+      # Raw Discharge Capacity in Ah
+      if cap_col and cap_col in cycle_data.columns:
+        dc_cap_ah = (
+            cycle_data[cycle_data[step_col] == dc_step][cap_col].iloc[-1]
+            if dc_step
+            else 0.0
+        )
+      elif active_mass_g and active_mass_g > 0:
+        dc_cap_ah = (dc_cap * active_mass_g) / 1000.0
+      else:
+        dc_cap_ah = dc_cap
     else:
       cc_cap = cycle_data[target_cap_col].max()
       cv_cap = 0.0
       dc_cap = 0.0
+      if cap_col and cap_col in cycle_data.columns:
+        dc_cap_ah = cycle_data[cap_col].max()
+      else:
+        dc_cap_ah = 0.0
 
     total_charge_cap = cc_cap + cv_cap
     coulombic_eff = (
@@ -184,6 +203,7 @@ def process_dataframe(df, filename="", active_mass_g=None):
         f"CV Charge ({unit_label})": round(cv_cap, 3),
         f"Total Charge ({unit_label})": round(total_charge_cap, 3),
         f"Discharge ({unit_label})": round(dc_cap, 3),
+        "Discharge Capacity (Ah)": round(dc_cap_ah, 6),
         "Coulombic Efficiency (%)": round(coulombic_eff, 2),
     })
 
@@ -272,8 +292,10 @@ if uploaded_files:
         results_df, unit_lbl = processed
 
         if not results_df.empty:
+          # Displays summary table including Discharge Capacity (Ah)
           st.dataframe(results_df, use_container_width=True)
 
+          # Charts plot specific capacities and Coulombic Efficiency only
           col1, col2 = st.columns(2)
           with col1:
             st.caption(f"Specific Capacities ({unit_lbl}) vs Cycle")
