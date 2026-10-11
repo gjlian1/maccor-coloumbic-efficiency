@@ -29,7 +29,7 @@ def parse_header_metadata(lines):
 
 
 def parse_maccor_binary_bytes(file_bytes, mass_g=None):
-  """Parses raw Maccor binary .000-.xxx files directly in memory."""
+  """Parses raw Maccor binary .000-.xxx files directly in memory preserving full float precision."""
   header_offset = 128
   record_format = (
       "<HHfffff"  # Step, Cycle, TestTime, Current, Voltage, Capacity, Energy
@@ -52,12 +52,12 @@ def parse_maccor_binary_bytes(file_bytes, mass_g=None):
         records.append({
             "Cycle C": int(cycle) if cycle > 0 else 1,
             "Step": int(step),
-            "Test Time [s]": round(test_time, 2),
-            "Current [A]": round(current, 6),
-            "Voltage [V]": round(voltage, 4),
-            "Capacity": round(capacity, 6),
-            "S.Capacity (mAh/g)": round(spec_cap, 3),
-            "Energy": round(energy, 6),
+            "Test Time [s]": test_time,
+            "Current [A]": current,
+            "Voltage [V]": voltage,
+            "Capacity": capacity,
+            "S.Capacity (mAh/g)": spec_cap,
+            "Energy": energy,
             "MD": (
                 "C"
                 if current > 0.000001
@@ -107,7 +107,7 @@ def auto_detect_columns(df):
 
 
 def process_dataframe(df, filename="", active_mass_g=None):
-  """Calculates CC, CV, Total Charge, Discharge Specific Capacities (mAh/g), Discharge Capacity (Ah), and Coulombic Efficiency."""
+  """Calculates capacities and Coulombic Efficiency using full, unrounded floats."""
   df.columns = df.columns.str.strip()
 
   cycle_col, spec_cap_col, cap_col, md_col, step_col = auto_detect_columns(df)
@@ -191,19 +191,19 @@ def process_dataframe(df, filename="", active_mass_g=None):
 
     results.append({
         "Cycle": cycle,
-        f"CC Charge ({unit_label})": round(cc_cap, 3),
-        f"CV Charge ({unit_label})": round(cv_cap, 3),
-        f"Total Charge ({unit_label})": round(total_charge_cap, 3),
-        f"Discharge ({unit_label})": round(dc_cap, 3),
-        "Discharge Capacity (Ah)": round(dc_cap_ah, 6),
-        "Coulombic Efficiency (%)": round(coulombic_eff, 2),
+        f"CC Charge ({unit_label})": float(cc_cap),
+        f"CV Charge ({unit_label})": float(cv_cap),
+        f"Total Charge ({unit_label})": float(total_charge_cap),
+        f"Discharge ({unit_label})": float(dc_cap),
+        "Discharge Capacity (Ah)": float(dc_cap_ah),
+        "Coulombic Efficiency (%)": float(coulombic_eff),
     })
 
   return pd.DataFrame(results), unit_label
 
 
 def render_click_to_copy_table(df, height=350):
-  """Renders an interactive HTML table where clicking any column header copies all its row values directly to the clipboard (without sorting)."""
+  """Renders an interactive HTML table where clicking any column header copies all its exact row values directly to the clipboard."""
   headers_html = "".join(
       f"<th onclick=\"copyColumn({i}, '{col}')\" title=\"Click to copy all"
       f' {col} values">{col} 📋</th>'
