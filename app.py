@@ -4,6 +4,7 @@ import re
 import struct
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 st.set_page_config(
     page_title="Battery Data Analyzer", page_icon="🔋", layout="wide"
@@ -11,7 +12,7 @@ st.set_page_config(
 
 st.title("🔋 Battery Data & Specific Capacity Analyzer")
 st.markdown(
-    "Drag & drop Maccor files (`.000`–`.xxx`, `.txt`, `.csv`) to extract step specific capacities (**mAh/g**), discharge capacity (**Ah**), and plot performance curves."
+    "Drag & drop Maccor files (`.000`–`.xxx`, `.txt`, `.csv`) to extract step capacities and plot performance curves."
 )
 
 
@@ -83,27 +84,22 @@ def auto_detect_columns(df):
     c_clean = str(col).strip()
     c_lower = c_clean.lower()
 
-    # Cycle column (targets 'Cycle C', excludes 'Cycle P')
     if not cycle_col and "cycle" in c_lower and "p" not in c_lower:
       cycle_col = c_clean
 
-    # Specific Capacity column (mAh/g)
     if (
         not spec_cap_col
         and ("s.capacity" in c_lower or "mah/g" in c_lower or "spec" in c_lower)
     ):
       spec_cap_col = c_clean
 
-    # Raw Capacity column (Ah)
     if not cap_col and ("capacity" in c_lower or "cap" in c_lower):
       if c_clean != spec_cap_col:
         cap_col = c_clean
 
-    # Mode column (MD / Mode)
     if not md_col and c_lower in ["md", "mode", "md."]:
       md_col = c_clean
 
-    # Step column
     if not step_col and "step" in c_lower and "time" not in c_lower:
       step_col = c_clean
 
@@ -116,14 +112,12 @@ def process_dataframe(df, filename="", active_mass_g=None):
 
   cycle_col, spec_cap_col, cap_col, md_col, step_col = auto_detect_columns(df)
 
-  # Determine target capacity column for mAh/g
   if spec_cap_col and spec_cap_col in df.columns:
     target_cap_col = spec_cap_col
     unit_label = "mAh/g"
   elif cap_col and cap_col in df.columns:
     target_cap_col = cap_col
     unit_label = "mAh/g" if active_mass_g else "Ah"
-    # Convert Ah to mAh/g if active mass is provided
     if active_mass_g and active_mass_g > 0:
       df[target_cap_col] = (df[target_cap_col] * 1000.0) / active_mass_g
   else:
@@ -155,7 +149,6 @@ def process_dataframe(df, filename="", active_mass_g=None):
       cv_step = c_steps[1] if len(c_steps) > 1 else None
       dc_step = d_steps[0] if len(d_steps) > 0 else None
 
-      # Specific capacities (mAh/g)
       cc_cap = (
           cycle_data[cycle_data[step_col] == cc_step][target_cap_col].iloc[-1]
           if cc_step
@@ -172,7 +165,6 @@ def process_dataframe(df, filename="", active_mass_g=None):
           else 0.0
       )
 
-      # Raw Discharge Capacity in Ah
       if cap_col and cap_col in cycle_data.columns:
         dc_cap_ah = (
             cycle_data[cycle_data[step_col] == dc_step][cap_col].iloc[-1]
@@ -208,6 +200,115 @@ def process_dataframe(df, filename="", active_mass_g=None):
     })
 
   return pd.DataFrame(results), unit_label
+
+
+def render_click_to_copy_table(df, height=350):
+  """Renders an interactive HTML table where clicking any column header copies all its row values directly to the clipboard (without sorting)."""
+  headers_html = "".join(
+      f"<th onclick=\"copyColumn({i}, '{col}')\" title=\"Click to copy all"
+      f' {col} values">{col} 📋</th>'
+      for i, col in enumerate(df.columns)
+  )
+
+  rows_html = ""
+  for _, row in df.iterrows():
+    cells = "".join(f"<td>{val}</td>" for val in row)
+    rows_html += f"<tr>{cells}</tr>"
+
+  html_code = f"""
+    <style>
+        .table-container {{
+            max-height: {height}px;
+            overflow-y: auto;
+            border: 1px solid #374151;
+            border-radius: 8px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            margin-bottom: 15px;
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+            color: #e5e7eb;
+            background-color: #0e1117;
+        }}
+        th {{
+            position: sticky;
+            top: 0;
+            background-color: #1f2937;
+            color: #60a5fa;
+            padding: 10px 12px;
+            text-align: left;
+            cursor: pointer;
+            border-bottom: 2px solid #4b5563;
+            user-select: none;
+            white-space: nowrap;
+        }}
+        th:hover {{
+            background-color: #374151;
+            color: #93c5fd;
+        }}
+        td {{
+            padding: 8px 12px;
+            border-bottom: 1px solid #1f2937;
+            white-space: nowrap;
+        }}
+        tr:hover {{
+            background-color: #111827;
+        }}
+        #toast {{
+            visibility: hidden;
+            min-width: 200px;
+            background-color: #10b981;
+            color: #ffffff;
+            font-weight: 600;
+            text-align: center;
+            border-radius: 6px;
+            padding: 8px 16px;
+            position: fixed;
+            z-index: 1000;
+            top: 10px;
+            right: 20px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+            font-size: 13px;
+        }}
+        #toast.show {{
+            visibility: visible;
+        }}
+    </style>
+
+    <div id="toast">Copied to Clipboard!</div>
+    <div class="table-container">
+        <table id="maccorTable">
+            <thead><tr>{headers_html}</tr></thead>
+            <tbody>{rows_html}</tbody>
+        </table>
+    </div>
+
+    <script>
+        function copyColumn(colIdx, colName) {{
+            const table = document.getElementById("maccorTable");
+            const rows = table.rows;
+            let colValues = [];
+            
+            for (let i = 1; i < rows.length; i++) {{
+                colValues.push(rows[i].cells[colIdx].innerText);
+            }}
+            
+            const textToCopy = colValues.join("\\n");
+            
+            navigator.clipboard.writeText(textToCopy).then(() => {{
+                const toast = document.getElementById("toast");
+                toast.innerText = "Copied " + colValues.length + " values from '" + colName + "'";
+                toast.className = "show";
+                setTimeout(() => {{ toast.className = toast.className.replace("show", ""); }}, 2200);
+            }}).catch(err => {{
+                console.error('Failed to copy: ', err);
+            }});
+        }}
+    </script>
+    """
+  components.html(html_code, height=height + 30, scrolling=True)
 
 
 # Sidebar Options
@@ -248,13 +349,11 @@ if uploaded_files:
       content = file_bytes.decode("latin-1")
       lines = content.splitlines()
 
-      # Parse header metadata for mass if not supplied via sidebar
       if not parsed_mass:
         parsed_mass = parse_header_metadata(lines[:20])
         if parsed_mass:
           st.caption(f"ℹ️ Detected Active Mass from Header: `{parsed_mass} g`")
 
-      # Dynamic header row locator
       header_line = 0
       for i, line in enumerate(lines):
         if any(
@@ -292,10 +391,11 @@ if uploaded_files:
         results_df, unit_lbl = processed
 
         if not results_df.empty:
-          # Displays summary table including Discharge Capacity (Ah)
-          st.dataframe(results_df, use_container_width=True)
+          st.caption(
+              "💡 **Click any column header below to copy all its row values to your clipboard.**"
+          )
+          render_click_to_copy_table(results_df, height=320)
 
-          # Charts plot specific capacities and Coulombic Efficiency only
           col1, col2 = st.columns(2)
           with col1:
             st.caption(f"Specific Capacities ({unit_lbl}) vs Cycle")
