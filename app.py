@@ -9,13 +9,28 @@ st.set_page_config(
     page_title="Battery Data Analyzer", page_icon="🔋", layout="wide"
 )
 
-st.title("🔋 Battery Data & Capacity Analyzer")
+st.title("🔋 Battery Data & Specific Capacity Analyzer")
 st.markdown(
-    "Drag & drop Maccor files (`.000`–`.xxx`, `.txt`, `.csv`) to extract step capacities and plot performance curves."
+    "Drag & drop Maccor files (`.000`–`.xxx`, `.txt`, `.csv`) to extract step specific capacities (**mAh/g**) and plot performance curves."
 )
 
 
-def parse_maccor_binary_bytes(file_bytes):
+def parse_header_metadata(lines):
+  """Extracts Active Mass (SCap) from header metadata if available (e.g.
+
+  'SCap: 0.0347 g').
+  """
+  mass_g = None
+  for line in lines:
+    if "SCap:" in line or "Mass:" in line:
+      match = re.search(r"(\d+\.\d+)", line)
+      if match:
+        mass_g = float(match.group(1))
+        break
+  return mass_g
+
+
+def parse_maccor_binary_bytes(file_bytes, mass_g=None):
   """Parses raw Maccor binary .000-.xxx files directly in memory."""
   header_offset = 128
   record_format = (
@@ -33,6 +48,9 @@ def parse_maccor_binary_bytes(file_bytes):
           struct.unpack(record_format, chunk)
       )
       if -100.0 <= current <= 500.0 and 0.0 <= voltage <= 20.0:
+        spec_cap = (
+            (capacity * 1000.0 / mass_g) if (mass_g and mass_g > 0) else 0.0
+        )
         records.append({
             "Cycle C": int(cycle) if cycle > 0 else 1,
             "Step": int(step),
@@ -40,8 +58,13 @@ def parse_maccor_binary_bytes(file_bytes):
             "Current [A]": round(current, 6),
             "Voltage [V]": round(voltage, 4),
             "Capacity": round(capacity, 6),
+            "S.Capacity (mAh/g)": round(spec_cap, 3),
             "Energy": round(energy, 6),
-            "MD": "C" if current > 0.000001 else ("D" if current < -0.000001 else "R"),
+            "MD": (
+                "C"
+                if current > 0.000001
+                else ("D" if current < -0.000001 else "R")
+            ),
         })
     except Exception:
       continue
@@ -50,50 +73,65 @@ def parse_maccor_binary_bytes(file_bytes):
 
 
 def auto_detect_columns(df):
-  """Smart auto-detection tailored for Maccor CSV headers (Cycle C, Capacity, MD, Step)."""
-  cycle_col, cap_col, md_col, step_col = None, None, None, None
+  """Locates Cycle, Specific Capacity / Capacity, Mode (MD), and Step columns."""
+  cycle_col, spec_cap_col, cap_col, md_col, step_col = (
+      None,
+      None,
+      None,
+      None,
+      None,
+  )
 
   for col in df.columns:
     c_clean = str(col).strip()
     c_lower = c_clean.lower()
 
-    # Match Cycle C (ignoring Cycle P)
+    # Cycle column (targets 'Cycle C', excludes 'Cycle P')
     if not cycle_col and "cycle" in c_lower and "p" not in c_lower:
       cycle_col = c_clean
 
-    # Match Capacity / Cap
-    if not cap_col and ("capacity" in c_lower or "cap" in c_lower or "ah" in c_lower):
-      cap_col = c_clean
+    # Specific Capacity column (mAh/g)
+    if (
+        not spec_cap_col
+        and ("s.capacity" in c_lower or "mah/g" in c_lower or "spec" in c_lower)
+    ):
+      spec_cap_col = c_clean
 
-    # Match MD / Mode
+    # Raw Capacity column (Ah)
+    if not cap_col and ("capacity" in c_lower or "cap" in c_lower):
+      if c_clean != spec_cap_col:
+        cap_col = c_clean
+
+    # Mode column (MD / Mode)
     if not md_col and c_lower in ["md", "mode", "md."]:
       md_col = c_clean
 
-    # Match Step
+    # Step column
     if not step_col and "step" in c_lower and "time" not in c_lower:
       step_col = c_clean
 
-  return cycle_col, cap_col, md_col, step_col
+  return cycle_col, spec_cap_col, cap_col, md_col, step_col
 
 
-def process_dataframe(df, filename=""):
-  """Extracts CC, CV, Total Charge, Discharge capacities, and Coulombic Efficiency."""
+def process_dataframe(df, filename="", active_mass_g=None):
+  """Calculates CC, CV, Total Charge, Discharge Specific Capacities (mAh/g) and Coulombic Efficiency."""
   df.columns = df.columns.str.strip()
 
-  cycle_col, cap_col, md_col, step_col = auto_detect_columns(df)
+  cycle_col, spec_cap_col, cap_col, md_col, step_col = auto_detect_columns(df)
 
-  # Fallback column selector if auto-detect fails
-  if not cycle_col or not cap_col:
-    st.warning(f"⚠️ Could not automatically identify columns in `{filename}`.")
-    col1, col2 = st.columns(2)
-    with col1:
-      cycle_col = st.selectbox(
-          "Select Cycle Column:", options=df.columns, key=f"cycle_{filename}"
-      )
-    with col2:
-      cap_col = st.selectbox(
-          "Select Capacity Column:", options=df.columns, key=f"cap_{filename}"
-      )
+  # Determine target capacity column for mAh/g
+  if spec_cap_col and spec_cap_col in df.columns:
+    target_cap_col = spec_cap_col
+    unit_label = "mAh/g"
+  elif cap_col and cap_col in df.columns:
+    target_cap_col = cap_col
+    unit_label = "mAh/g" if active_mass_g else "Ah"
+    # Convert Ah to mAh/g if active mass is provided
+    if active_mass_g and active_mass_g > 0:
+      df[target_cap_col] = (df[target_cap_col] * 1000.0) / active_mass_g
+  else:
+    st.error(f"❌ Could not locate capacity data in `{filename}`.")
+    return None
 
   df = df.dropna(subset=[cycle_col]).copy()
   df[cycle_col] = (
@@ -116,22 +154,22 @@ def process_dataframe(df, filename=""):
       dc_step = d_steps[0] if len(d_steps) > 0 else None
 
       cc_cap = (
-          cycle_data[cycle_data[step_col] == cc_step][cap_col].iloc[-1]
+          cycle_data[cycle_data[step_col] == cc_step][target_cap_col].iloc[-1]
           if cc_step
           else 0.0
       )
       cv_cap = (
-          cycle_data[cycle_data[step_col] == cv_step][cap_col].iloc[-1]
+          cycle_data[cycle_data[step_col] == cv_step][target_cap_col].iloc[-1]
           if cv_step
           else 0.0
       )
       dc_cap = (
-          cycle_data[cycle_data[step_col] == dc_step][cap_col].iloc[-1]
+          cycle_data[cycle_data[step_col] == dc_step][target_cap_col].iloc[-1]
           if dc_step
           else 0.0
       )
     else:
-      cc_cap = cycle_data[cap_col].max()
+      cc_cap = cycle_data[target_cap_col].max()
       cv_cap = 0.0
       dc_cap = 0.0
 
@@ -142,21 +180,32 @@ def process_dataframe(df, filename=""):
 
     results.append({
         "Cycle": cycle,
-        "CC Capacity (Ah)": round(cc_cap, 6),
-        "CV Capacity (Ah)": round(cv_cap, 6),
-        "Total Charge Capacity (Ah)": round(total_charge_cap, 6),
-        "Discharge Capacity (Ah)": round(dc_cap, 6),
+        f"CC Charge ({unit_label})": round(cc_cap, 3),
+        f"CV Charge ({unit_label})": round(cv_cap, 3),
+        f"Total Charge ({unit_label})": round(total_charge_cap, 3),
+        f"Discharge ({unit_label})": round(dc_cap, 3),
         "Coulombic Efficiency (%)": round(coulombic_eff, 2),
     })
 
-  return pd.DataFrame(results)
+  return pd.DataFrame(results), unit_label
 
+
+# Sidebar Options
+st.sidebar.header("⚙️ Active Mass Settings")
+custom_mass = st.sidebar.number_input(
+    "Active Material Mass (g) [Optional Override]",
+    min_value=0.0,
+    value=0.0,
+    step=0.001,
+    format="%.4f",
+    help="Used to convert Capacity (Ah) into Specific Capacity (mAh/g) if the file lacks an S.Capacity column.",
+)
 
 # File Uploader
 allowed_exts = ["txt", "csv"] + [f"{i:03d}" for i in range(1000)]
 
 uploaded_files = st.file_uploader(
-    "Drag & drop your files here (.000–.xxx, .txt, .csv)",
+    "Drag & drop Maccor files here (.000–.xxx, .txt, .csv)",
     type=allowed_exts,
     accept_multiple_files=True,
 )
@@ -170,14 +219,22 @@ if uploaded_files:
     is_binary = bool(re.match(r"^\d{3}$", ext))
     file_bytes = uploaded_file.getvalue()
 
+    parsed_mass = custom_mass if custom_mass > 0 else None
+
     if is_binary:
       st.info(f"⚡ Decoding binary data (`.{ext}`)...")
-      raw_df = parse_maccor_binary_bytes(file_bytes)
+      raw_df = parse_maccor_binary_bytes(file_bytes, mass_g=parsed_mass)
     else:
       content = file_bytes.decode("latin-1")
       lines = content.splitlines()
 
-      # Dynamic header row detection for Maccor export files
+      # Parse header metadata for mass if not supplied via sidebar
+      if not parsed_mass:
+        parsed_mass = parse_header_metadata(lines[:20])
+        if parsed_mass:
+          st.caption(f"ℹ️ Detected Active Mass from Header: `{parsed_mass} g`")
+
+      # Dynamic header row locator
       header_line = 0
       for i, line in enumerate(lines):
         if any(
@@ -189,6 +246,7 @@ if uploaded_files:
                 "Test Time",
                 "Step",
                 "Capacity",
+                "S.Capacity",
                 "MD",
             ]
         ):
@@ -197,46 +255,47 @@ if uploaded_files:
 
       buffer = io.StringIO(content)
       try:
-        # Attempts tab-delimited first (standard Maccor CSV format), then falls back to comma
         raw_df = pd.read_csv(buffer, skiprows=header_line, sep="\t")
         if raw_df.shape[1] <= 1:
           buffer.seek(0)
           raw_df = pd.read_csv(buffer, skiprows=header_line, sep=",")
       except Exception as e:
-        st.error(f"Error parsing file: {e}")
+        st.error(f"Error reading file: {e}")
         raw_df = None
 
     if raw_df is not None:
-      results_df = process_dataframe(raw_df, filename=uploaded_file.name)
+      processed = process_dataframe(
+          raw_df, filename=uploaded_file.name, active_mass_g=parsed_mass
+      )
 
-      if results_df is not None and not results_df.empty:
-        # Data Summary Table
-        st.dataframe(results_df, use_container_width=True)
+      if processed:
+        results_df, unit_lbl = processed
 
-        # Performance Plots
-        col1, col2 = st.columns(2)
-        with col1:
-          st.caption("Capacities vs Cycle")
-          st.line_chart(
-              results_df.set_index("Cycle")[
-                  [
-                      "CC Capacity (Ah)",
-                      "CV Capacity (Ah)",
-                      "Total Charge Capacity (Ah)",
-                      "Discharge Capacity (Ah)",
-                  ]
-              ]
+        if not results_df.empty:
+          st.dataframe(results_df, use_container_width=True)
+
+          col1, col2 = st.columns(2)
+          with col1:
+            st.caption(f"Specific Capacities ({unit_lbl}) vs Cycle")
+            st.line_chart(
+                results_df.set_index("Cycle")[
+                    [
+                        f"CC Charge ({unit_lbl})",
+                        f"CV Charge ({unit_lbl})",
+                        f"Total Charge ({unit_lbl})",
+                        f"Discharge ({unit_lbl})",
+                    ]
+                ]
+            )
+          with col2:
+            st.caption("Coulombic Efficiency (%) vs Cycle")
+            st.line_chart(
+                results_df.set_index("Cycle")["Coulombic Efficiency (%)"]
+            )
+
+          st.download_button(
+              label="📥 Download CSV Summary",
+              data=results_df.to_csv(index=False).encode("utf-8"),
+              file_name=f"processed_{uploaded_file.name}.csv",
+              mime="text/csv",
           )
-        with col2:
-          st.caption("Coulombic Efficiency (%) vs Cycle")
-          st.line_chart(
-              results_df.set_index("Cycle")["Coulombic Efficiency (%)"]
-          )
-
-        # Download Summary CSV
-        st.download_button(
-            label="📥 Download CSV Summary",
-            data=results_df.to_csv(index=False).encode("utf-8"),
-            file_name=f"processed_{uploaded_file.name}.csv",
-            mime="text/csv",
-        )
